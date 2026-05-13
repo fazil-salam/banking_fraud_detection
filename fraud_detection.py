@@ -24,62 +24,6 @@ DATASET:
   https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud
   and place it in the data/ folder.
 
-=================================================================
-INTERVIEW Q&A  — Read this before your interview
-=================================================================
-
-Q: Why did you choose XGBoost over Logistic Regression?
-A: XGBoost handles non-linear relationships between features
-   (e.g. fraud at night AND high amount AND unusual merchant).
-   Logistic Regression assumes these features act independently.
-   XGBoost also handles outliers better — fraud amounts are often
-   extreme values that confuse linear models.
-
-Q: What is SMOTE and why did you use it?
-A: SMOTE = Synthetic Minority Oversampling Technique.
-   With 0.17% fraud, a naive model learns to just predict
-   "not fraud" every time and gets 99.83% accuracy while
-   being completely useless. SMOTE generates synthetic fraud
-   samples by interpolating between real fraud cases, so the
-   model sees a balanced dataset during training.
-
-Q: What does AUC-ROC mean?
-A: Area Under the ROC Curve. It measures the probability that
-   the model ranks a random fraud case higher than a random
-   non-fraud case. 0.5 = random guessing, 1.0 = perfect.
-   97.8% AUC means the model almost always correctly ranks
-   fraud above legitimate transactions.
-
-Q: What is SHAP and why is it important for a bank?
-A: SHAP (SHapley Additive exPlanations) explains WHY the model
-   made each prediction. For a bank, every fraud flag must be
-   explainable to compliance officers and regulators.
-   SHAP shows: "This transaction was flagged because the amount
-   was 3x higher than usual AND it happened at 3am AND the
-   merchant category was unusual for this customer."
-
-Q: What is GridSearchCV?
-A: It automatically tries all combinations of hyperparameters
-   (like tree depth, learning rate) using cross-validation,
-   and picks the combination with the best performance.
-   5-fold CV means the data is split 5 ways, trained on 4
-   parts and tested on 1 — repeated 5 times to get a reliable
-   performance estimate.
-
-Q: What is MLflow?
-A: MLflow tracks all your experiment runs — parameters,
-   metrics, and model files — automatically. So you can
-   compare: "Run 1: max_depth=3, AUC=0.95" vs
-   "Run 2: max_depth=6, AUC=0.978" without writing it down.
-   Run `mlflow ui` after training to see the dashboard.
-
-Q: What is statistical drift monitoring?
-A: After deployment, the distribution of new transactions may
-   shift from what the model was trained on. We compare the
-   mean and standard deviation of new incoming features vs
-   the training data. If they diverge beyond a threshold,
-   we flag that the model needs retraining.
-=================================================================
 """
 
 import os
