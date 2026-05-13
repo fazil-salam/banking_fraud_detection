@@ -5,8 +5,18 @@ PROJECT 1: Financial Transaction Fraud Detection
 
 WHAT THIS PROJECT DOES:
   Detects fraudulent credit card transactions using XGBoost.
-  The main challenge is that fraud is extremely rare (0.17% of
+  The main challenge is that fraud is extremely rare (~0.17% of
   all transactions), so we use SMOTE to fix the class imbalance.
+
+  Pipeline:
+    1. Load data (real Kaggle CSV or synthetic fallback)
+    2. Engineer features (hour, log_amount, zscore, etc.)
+    3. Balance classes with SMOTE
+    4. Train XGBoost with GridSearchCV hyperparameter tuning
+    5. Evaluate — AUC-ROC, Precision, Recall
+    6. Explain predictions with SHAP
+    7. Track experiment with MLflow
+    8. Monitor for data drift
 
 HOW TO RUN:
   pip install -r requirements.txt
@@ -16,10 +26,10 @@ OUTPUT FILES:
   - shap_summary.png     : Which features drive fraud predictions
   - shap_waterfall.png   : Why one specific transaction was flagged
   - confusion_matrix.png : How many frauds were caught vs missed
-  - mlruns/              : MLflow experiment logs (all model runs)
+  - mlruns/              : MLflow experiment logs
 
 DATASET:
-  Uses synthetic data by default (generated here).
+  Uses synthetic data by default (generated automatically).
   For real results: download creditcard.csv from
   https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud
   and place it in the data/ folder.
@@ -37,8 +47,6 @@ import seaborn as sns
 
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (
     classification_report, roc_auc_score,
     confusion_matrix, precision_score, recall_score
@@ -210,93 +218,79 @@ def preprocess(df):
 # STEP 4: MODEL TRAINING + HYPERPARAMETER TUNING
 # =================================================================
 
-def train_models(X_train, y_train):
+def train_model(X_train, y_train):
     """
-    Trains three models and tunes XGBoost with GridSearchCV.
+    Trains XGBoost with GridSearchCV hyperparameter tuning.
 
-    Models compared:
-      1. Logistic Regression  — simple linear baseline
-      2. Random Forest        — ensemble of decision trees
-      3. XGBoost              — gradient boosted trees (usually best)
+    XGBoost is gradient boosted trees:
+      - Starts with a simple prediction
+      - Each new tree corrects the errors of the previous one
+      - Final prediction = sum of all trees
 
-    GridSearchCV tries all combinations of XGBoost parameters and
-    picks the best one using 3-fold cross-validation.
+    GridSearchCV tests all parameter combinations with 3-fold
+    cross-validation and picks the best one automatically.
+
+    Key parameters tuned:
+      max_depth        : how deep each tree grows (3-5 is typical)
+      learning_rate    : how much each tree contributes (lower = more trees needed but more accurate)
+      n_estimators     : how many trees to build
+      scale_pos_weight : compensates for class imbalance (fraud is rare)
     """
-    models = {}
-
-    # --- Model 1: Logistic Regression (baseline) ---
-    print("Training Logistic Regression (baseline)...")
-    lr = LogisticRegression(max_iter=1000, random_state=42, class_weight='balanced')
-    lr.fit(X_train, y_train)
-    models['Logistic Regression'] = lr
-
-    # --- Model 2: Random Forest ---
-    print("Training Random Forest...")
-    rf = RandomForestClassifier(n_estimators=100, random_state=42,
-                                 class_weight='balanced', n_jobs=-1)
-    rf.fit(X_train, y_train)
-    models['Random Forest'] = rf
-
-    # --- Model 3: XGBoost with hyperparameter tuning ---
     print("Training XGBoost with GridSearchCV (this takes ~1-2 min)...")
     param_grid = {
         'max_depth': [3, 5],
         'learning_rate': [0.05, 0.1],
         'n_estimators': [100, 200],
-        'scale_pos_weight': [50, 100]   # handles class imbalance
+        'scale_pos_weight': [50, 100]   # higher = more weight on fraud class
     }
     xgb = XGBClassifier(eval_metric='logloss', random_state=42, n_jobs=-1)
     grid_search = GridSearchCV(xgb, param_grid, cv=3, scoring='roc_auc',
                                n_jobs=-1, verbose=1)
     grid_search.fit(X_train, y_train)
-    best_xgb = grid_search.best_estimator_
-    models['XGBoost'] = best_xgb
-    print(f"Best XGBoost params: {grid_search.best_params_}\n")
+    best_model = grid_search.best_estimator_
+    print(f"Best params: {grid_search.best_params_}")
+    print(f"Best CV AUC-ROC: {grid_search.best_score_:.4f}\n")
 
-    return models
+    return best_model
 
 
 # =================================================================
 # STEP 5: EVALUATION
 # =================================================================
 
-def evaluate_models(models, X_test, y_test):
+def evaluate_model(model, X_test, y_test):
     """
-    Evaluates all models and prints performance metrics.
+    Evaluates XGBoost and prints performance metrics.
 
     Key metrics for fraud detection:
-      - AUC-ROC    : overall ranking ability (higher is better)
+      - AUC-ROC    : overall ranking ability across all thresholds (higher = better)
       - Precision  : of transactions flagged as fraud, how many were actually fraud?
       - Recall     : of all actual frauds, how many did we catch?
 
-    In fraud detection, RECALL is often more important than precision
-    (missing a fraud is worse than a false alarm).
+    In fraud detection, RECALL is more important than Precision.
+    Missing a fraud (false negative) costs more than a false alarm.
     """
-    results = {}
+    y_pred = model.predict(X_test)
+    y_prob = model.predict_proba(X_test)[:, 1]
+
+    auc  = roc_auc_score(y_test, y_prob)
+    prec = precision_score(y_test, y_pred, zero_division=0)
+    rec  = recall_score(y_test, y_pred, zero_division=0)
+
     print("=" * 60)
-    print("MODEL EVALUATION RESULTS")
+    print("XGBOOST EVALUATION RESULTS")
     print("=" * 60)
+    print(f"  AUC-ROC   : {auc:.4f}")
+    print(f"  Precision : {prec:.4f}  (of flagged fraud, how many were real)")
+    print(f"  Recall    : {rec:.4f}  (of real frauds, how many did we catch)")
+    print()
+    print(classification_report(y_test, y_pred,
+                                 target_names=['Normal', 'Fraud'], zero_division=0))
 
-    for name, model in models.items():
-        y_pred = model.predict(X_test)
-        y_prob = model.predict_proba(X_test)[:, 1]
-
-        auc = roc_auc_score(y_test, y_prob)
-        prec = precision_score(y_test, y_pred, zero_division=0)
-        rec = recall_score(y_test, y_pred, zero_division=0)
-
-        results[name] = {'auc': auc, 'precision': prec, 'recall': rec, 'model': model}
-        print(f"\n{name}:")
-        print(f"  AUC-ROC   : {auc:.4f}")
-        print(f"  Precision : {prec:.4f}  (of flagged fraud, how many were real)")
-        print(f"  Recall    : {rec:.4f}  (of real frauds, how many did we catch)")
-        print(classification_report(y_test, y_pred,
-                                     target_names=['Normal', 'Fraud'], zero_division=0))
-
-    return results
+    return {'auc': auc, 'precision': prec, 'recall': rec}
 
 
-def plot_confusion_matrix(model, X_test, y_test, model_name="XGBoost"):
+def plot_confusion_matrix(model, X_test, y_test):
     """Saves a confusion matrix plot as confusion_matrix.png"""
     y_pred = model.predict(X_test)
     cm = confusion_matrix(y_test, y_pred)
@@ -305,8 +299,7 @@ def plot_confusion_matrix(model, X_test, y_test, model_name="XGBoost"):
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
                 xticklabels=['Normal', 'Fraud'],
                 yticklabels=['Normal', 'Fraud'])
-    plt.title(f'{model_name} — Confusion Matrix\n'
-              f'(True labels on Y axis, Predicted on X axis)')
+    plt.title('XGBoost — Confusion Matrix\n(True labels on Y axis, Predicted on X axis)')
     plt.ylabel('Actual')
     plt.xlabel('Predicted')
     plt.tight_layout()
@@ -373,37 +366,29 @@ def explain_with_shap(model, X_test, feature_names, n_samples=200):
 # STEP 7: MLFLOW EXPERIMENT TRACKING
 # =================================================================
 
-def log_to_mlflow(results, best_model_name):
+def log_to_mlflow(model, metrics):
     """
-    Logs all model runs to MLflow.
+    Logs the XGBoost run to MLflow.
 
     After running this script, type:
       mlflow ui
-    Then open http://localhost:5000 to see all experiments
-    with their parameters, metrics, and model files.
+    Then open http://localhost:5000 to see the experiment
+    with metrics, parameters, and the saved model file.
 
     This is how data scientists track experiments in production —
-    instead of writing results in a notebook or spreadsheet.
+    not spreadsheets or print statements, but a versioned log
+    you can compare across retraining runs.
     """
-    # Use local file-based tracking (no SQLite, no server needed)
-    import os
     mlflow.set_tracking_uri(os.path.abspath("mlruns"))
     mlflow.set_experiment("fraud_detection")
-    print("\nLogging experiments to MLflow...")
+    print("\nLogging to MLflow...")
 
-    for name, data in results.items():
-        with mlflow.start_run(run_name=name):
-            # Log performance metrics
-            mlflow.log_metric("auc_roc", data['auc'])
-            mlflow.log_metric("precision", data['precision'])
-            mlflow.log_metric("recall", data['recall'])
-
-            # Tag which model this is
-            mlflow.set_tag("model_type", name)
-            mlflow.set_tag("best_model", str(name == best_model_name))
-
-            # Log the model artifact
-            mlflow.sklearn.log_model(data['model'], "model")
+    with mlflow.start_run(run_name="XGBoost"):
+        mlflow.log_metric("auc_roc",   metrics['auc'])
+        mlflow.log_metric("precision", metrics['precision'])
+        mlflow.log_metric("recall",    metrics['recall'])
+        mlflow.set_tag("model_type", "XGBoost")
+        mlflow.sklearn.log_model(model, "model")
 
     print("MLflow logging complete. Run 'mlflow ui' to view dashboard.\n")
 
@@ -453,7 +438,7 @@ def check_data_drift(X_train, X_new, feature_names, threshold=0.3):
 
 def main():
     print("\n" + "=" * 60)
-    print("FRAUD DETECTION — FULL TRAINING PIPELINE")
+    print("FRAUD DETECTION — XGBOOST PIPELINE")
     print("=" * 60 + "\n")
 
     # Step 1: Load data
@@ -462,35 +447,28 @@ def main():
     # Step 2: Feature engineering
     df = engineer_features(df)
 
-    # Step 3: Preprocess (SMOTE + scaling)
+    # Step 3: Preprocess — split, scale, apply SMOTE
     X_train, y_train, X_test, y_test, scaler, feature_cols = preprocess(df)
 
-    # Step 4: Train models
-    models = train_models(X_train, y_train)
+    # Step 4: Train XGBoost with GridSearchCV
+    model = train_model(X_train, y_train)
 
-    # Step 5: Evaluate all models
-    results = evaluate_models(models, X_test, y_test)
+    # Step 5: Evaluate
+    metrics = evaluate_model(model, X_test, y_test)
 
-    # Step 6: Pick best model (highest AUC-ROC)
-    best_name = max(results, key=lambda k: results[k]['auc'])
-    best_model = results[best_name]['model']
-    print(f"\nBest model: {best_name} (AUC-ROC: {results[best_name]['auc']:.4f})")
+    # Step 6: Confusion matrix plot
+    plot_confusion_matrix(model, X_test, y_test)
 
-    # Step 7: Confusion matrix plot
-    plot_confusion_matrix(best_model, X_test, y_test, best_name)
-
-    # Step 8: SHAP explanations — always run on XGBoost (tree model required)
-    # TreeExplainer only works with tree-based models, not Logistic Regression
-    xgb_model = results['XGBoost']['model']
+    # Step 7: SHAP explainability
     try:
-        explain_with_shap(xgb_model, X_test, feature_cols)
+        explain_with_shap(model, X_test, feature_cols)
     except Exception as e:
         print(f"SHAP plot skipped: {e}")
 
-    # Step 9: Log to MLflow
-    log_to_mlflow(results, best_name)
+    # Step 8: Log to MLflow
+    log_to_mlflow(model, metrics)
 
-    # Step 10: Drift check on a simulated "new batch" (last 10% of test data)
+    # Step 9: Drift check — simulate new incoming batch (last 10% of test data)
     split = int(len(X_test) * 0.9)
     check_data_drift(X_train, X_test[split:], feature_cols)
 
