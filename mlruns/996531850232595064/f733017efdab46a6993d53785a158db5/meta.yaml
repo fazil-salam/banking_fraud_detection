@@ -1,0 +1,15 @@
+artifact_uri: /Users/abdulfazil/old downloads/Career & Resume/claude project/bmo ml
+  projects/01_fraud_detection/mlruns/996531850232595064/f733017efdab46a6993d53785a158db5/artifacts
+end_time: 1778716862749
+entry_point_name: ''
+experiment_id: '996531850232595064'
+lifecycle_stage: active
+run_id: f733017efdab46a6993d53785a158db5
+run_name: XGBoost
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1778716860779
+status: 3
+tags: []
+user_id: abdulfazil
