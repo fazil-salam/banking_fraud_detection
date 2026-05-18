@@ -1,0 +1,15 @@
+artifact_uri: /Users/abdulfazil/old downloads/Career & Resume/claude project/bmo ml
+  projects/01_fraud_detection/mlruns/292354394569959540/acfd0e244b4247f6ae0f7da1f4cc9d99/artifacts
+end_time: 1779145838604
+entry_point_name: ''
+experiment_id: '292354394569959540'
+lifecycle_stage: active
+run_id: acfd0e244b4247f6ae0f7da1f4cc9d99
+run_name: Random Forest
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1779145836756
+status: 3
+tags: []
+user_id: abdulfazil

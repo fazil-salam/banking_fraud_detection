@@ -1,39 +1,48 @@
 """
 =================================================================
+Project  : Financial Transaction Fraud Detection
+File     : fraud_detection.py
+Author   : Abdul Fazil Abdul Salam
+Date     : 2026-03-17
+Version  : 1.0
+Purpose  : Detects fraudulent credit card transactions on a highly
+           imbalanced dataset (0.17% fraud) using XGBoost with SMOTE
+           oversampling, SHAP explainability, MLflow experiment
+           tracking, and automated data drift monitoring.
+=================================================================
+
+=================================================================
 PROJECT 1: Financial Transaction Fraud Detection
 =================================================================
 
 WHAT THIS PROJECT DOES:
   Detects fraudulent credit card transactions using XGBoost.
-  The main challenge is that fraud is extremely rare (~0.17% of
+  The main challenge is that fraud is extremely rare (0.17% of
   all transactions), so we use SMOTE to fix the class imbalance.
-
-  Pipeline:
-    1. Load data (real Kaggle CSV or synthetic fallback)
-    2. Engineer features (hour, log_amount, zscore, etc.)
-    3. Balance classes with SMOTE
-    4. Train XGBoost with GridSearchCV hyperparameter tuning
-    5. Evaluate — AUC-ROC, Precision, Recall
-    6. Explain predictions with SHAP
-    7. Track experiment with MLflow
-    8. Monitor for data drift
 
 HOW TO RUN:
   pip install -r requirements.txt
   python fraud_detection.py
 
 OUTPUT FILES:
+  - confusion_matrix.png : How many frauds were caught vs missed
+  - roc_curve.png        : AUC-ROC curve comparing all three models
   - shap_summary.png     : Which features drive fraud predictions
   - shap_waterfall.png   : Why one specific transaction was flagged
-  - confusion_matrix.png : How many frauds were caught vs missed
-  - mlruns/              : MLflow experiment logs
+  - mlruns/              : MLflow experiment logs (all model runs)
+  - models/              : Saved model + scaler for Flask API
+
+FLASK API:
+  After training, run the REST API:
+    python app.py
+  Then POST to http://localhost:5000/predict to score live transactions.
 
 DATASET:
-  Uses synthetic data by default (generated automatically).
+  Uses synthetic data by default (generated here).
   For real results: download creditcard.csv from
   https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud
   and place it in the data/ folder.
-
+=================================================================
 """
 
 import os
@@ -47,13 +56,16 @@ import seaborn as sns
 
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (
-    classification_report, roc_auc_score,
+    classification_report, roc_auc_score, roc_curve,
     confusion_matrix, precision_score, recall_score
 )
 from imblearn.over_sampling import SMOTE
 from xgboost import XGBClassifier
 import shap
+import joblib
 import mlflow
 import mlflow.sklearn
 
@@ -218,79 +230,93 @@ def preprocess(df):
 # STEP 4: MODEL TRAINING + HYPERPARAMETER TUNING
 # =================================================================
 
-def train_model(X_train, y_train):
+def train_models(X_train, y_train):
     """
-    Trains XGBoost with GridSearchCV hyperparameter tuning.
+    Trains three models and tunes XGBoost with GridSearchCV.
 
-    XGBoost is gradient boosted trees:
-      - Starts with a simple prediction
-      - Each new tree corrects the errors of the previous one
-      - Final prediction = sum of all trees
+    Models compared:
+      1. Logistic Regression  — simple linear baseline
+      2. Random Forest        — ensemble of decision trees
+      3. XGBoost              — gradient boosted trees (usually best)
 
-    GridSearchCV tests all parameter combinations with 3-fold
-    cross-validation and picks the best one automatically.
-
-    Key parameters tuned:
-      max_depth        : how deep each tree grows (3-5 is typical)
-      learning_rate    : how much each tree contributes (lower = more trees needed but more accurate)
-      n_estimators     : how many trees to build
-      scale_pos_weight : compensates for class imbalance (fraud is rare)
+    GridSearchCV tries all combinations of XGBoost parameters and
+    picks the best one using 3-fold cross-validation.
     """
+    models = {}
+
+    # --- Model 1: Logistic Regression (baseline) ---
+    print("Training Logistic Regression (baseline)...")
+    lr = LogisticRegression(max_iter=1000, random_state=42, class_weight='balanced')
+    lr.fit(X_train, y_train)
+    models['Logistic Regression'] = lr
+
+    # --- Model 2: Random Forest ---
+    print("Training Random Forest...")
+    rf = RandomForestClassifier(n_estimators=100, random_state=42,
+                                 class_weight='balanced', n_jobs=-1)
+    rf.fit(X_train, y_train)
+    models['Random Forest'] = rf
+
+    # --- Model 3: XGBoost with hyperparameter tuning ---
     print("Training XGBoost with GridSearchCV (this takes ~1-2 min)...")
     param_grid = {
         'max_depth': [3, 5],
         'learning_rate': [0.05, 0.1],
         'n_estimators': [100, 200],
-        'scale_pos_weight': [50, 100]   # higher = more weight on fraud class
+        'scale_pos_weight': [50, 100]   # handles class imbalance
     }
     xgb = XGBClassifier(eval_metric='logloss', random_state=42, n_jobs=-1)
     grid_search = GridSearchCV(xgb, param_grid, cv=3, scoring='roc_auc',
                                n_jobs=-1, verbose=1)
     grid_search.fit(X_train, y_train)
-    best_model = grid_search.best_estimator_
-    print(f"Best params: {grid_search.best_params_}")
-    print(f"Best CV AUC-ROC: {grid_search.best_score_:.4f}\n")
+    best_xgb = grid_search.best_estimator_
+    models['XGBoost'] = best_xgb
+    print(f"Best XGBoost params: {grid_search.best_params_}\n")
 
-    return best_model
+    return models
 
 
 # =================================================================
 # STEP 5: EVALUATION
 # =================================================================
 
-def evaluate_model(model, X_test, y_test):
+def evaluate_models(models, X_test, y_test):
     """
-    Evaluates XGBoost and prints performance metrics.
+    Evaluates all models and prints performance metrics.
 
     Key metrics for fraud detection:
-      - AUC-ROC    : overall ranking ability across all thresholds (higher = better)
+      - AUC-ROC    : overall ranking ability (higher is better)
       - Precision  : of transactions flagged as fraud, how many were actually fraud?
       - Recall     : of all actual frauds, how many did we catch?
 
-    In fraud detection, RECALL is more important than Precision.
-    Missing a fraud (false negative) costs more than a false alarm.
+    In fraud detection, RECALL is often more important than precision
+    (missing a fraud is worse than a false alarm).
     """
-    y_pred = model.predict(X_test)
-    y_prob = model.predict_proba(X_test)[:, 1]
-
-    auc  = roc_auc_score(y_test, y_prob)
-    prec = precision_score(y_test, y_pred, zero_division=0)
-    rec  = recall_score(y_test, y_pred, zero_division=0)
-
+    results = {}
     print("=" * 60)
-    print("XGBOOST EVALUATION RESULTS")
+    print("MODEL EVALUATION RESULTS")
     print("=" * 60)
-    print(f"  AUC-ROC   : {auc:.4f}")
-    print(f"  Precision : {prec:.4f}  (of flagged fraud, how many were real)")
-    print(f"  Recall    : {rec:.4f}  (of real frauds, how many did we catch)")
-    print()
-    print(classification_report(y_test, y_pred,
-                                 target_names=['Normal', 'Fraud'], zero_division=0))
 
-    return {'auc': auc, 'precision': prec, 'recall': rec}
+    for name, model in models.items():
+        y_pred = model.predict(X_test)
+        y_prob = model.predict_proba(X_test)[:, 1]
+
+        auc = roc_auc_score(y_test, y_prob)
+        prec = precision_score(y_test, y_pred, zero_division=0)
+        rec = recall_score(y_test, y_pred, zero_division=0)
+
+        results[name] = {'auc': auc, 'precision': prec, 'recall': rec, 'model': model}
+        print(f"\n{name}:")
+        print(f"  AUC-ROC   : {auc:.4f}")
+        print(f"  Precision : {prec:.4f}  (of flagged fraud, how many were real)")
+        print(f"  Recall    : {rec:.4f}  (of real frauds, how many did we catch)")
+        print(classification_report(y_test, y_pred,
+                                     target_names=['Normal', 'Fraud'], zero_division=0))
+
+    return results
 
 
-def plot_confusion_matrix(model, X_test, y_test):
+def plot_confusion_matrix(model, X_test, y_test, model_name="XGBoost"):
     """Saves a confusion matrix plot as confusion_matrix.png"""
     y_pred = model.predict(X_test)
     cm = confusion_matrix(y_test, y_pred)
@@ -299,13 +325,59 @@ def plot_confusion_matrix(model, X_test, y_test):
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
                 xticklabels=['Normal', 'Fraud'],
                 yticklabels=['Normal', 'Fraud'])
-    plt.title('XGBoost — Confusion Matrix\n(True labels on Y axis, Predicted on X axis)')
+    plt.title(f'{model_name} — Confusion Matrix\n'
+              f'(True labels on Y axis, Predicted on X axis)')
     plt.ylabel('Actual')
     plt.xlabel('Predicted')
     plt.tight_layout()
     plt.savefig('confusion_matrix.png', dpi=150)
     plt.close()
     print("Saved: confusion_matrix.png")
+
+
+def plot_roc_curve(results, X_test, y_test):
+    """
+    Plots ROC curves for all models on a single chart.
+
+    ROC Curve shows the trade-off between:
+      - True Positive Rate (Recall) on Y axis
+      - False Positive Rate on X axis
+    across every possible decision threshold.
+
+    A perfect model hugs the top-left corner.
+    The diagonal line = random guessing (AUC = 0.50).
+    The shaded area under each curve = AUC-ROC score.
+
+    Comparing all three models visually makes it clear
+    why XGBoost was selected as the production model.
+    """
+    plt.figure(figsize=(9, 7))
+
+    colors = {'Logistic Regression': '#e74c3c',
+              'Random Forest':       '#2ecc71',
+              'XGBoost':             '#2980b9'}
+
+    for name, data in results.items():
+        y_prob = data['model'].predict_proba(X_test)[:, 1]
+        fpr, tpr, _ = roc_curve(y_test, y_prob)
+        auc = data['auc']
+        plt.plot(fpr, tpr,
+                 label=f"{name}  (AUC = {auc:.4f})",
+                 color=colors.get(name, 'gray'),
+                 linewidth=2.5)
+
+    # Diagonal baseline (random classifier)
+    plt.plot([0, 1], [0, 1], 'k--', linewidth=1, label='Random baseline (AUC = 0.50)')
+
+    plt.xlabel('False Positive Rate  (Normal transactions wrongly flagged)', fontsize=12)
+    plt.ylabel('True Positive Rate  (Frauds correctly caught)', fontsize=12)
+    plt.title('ROC Curve — Fraud Detection Model Comparison', fontsize=14, fontweight='bold')
+    plt.legend(loc='lower right', fontsize=11)
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig('roc_curve.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    print("Saved: roc_curve.png")
 
 
 # =================================================================
@@ -366,29 +438,42 @@ def explain_with_shap(model, X_test, feature_names, n_samples=200):
 # STEP 7: MLFLOW EXPERIMENT TRACKING
 # =================================================================
 
-def log_to_mlflow(model, metrics):
+def log_to_mlflow(results, best_model_name, X_sample):
     """
-    Logs the XGBoost run to MLflow.
+    Logs all model runs to MLflow.
 
     After running this script, type:
       mlflow ui
-    Then open http://localhost:5000 to see the experiment
-    with metrics, parameters, and the saved model file.
+    Then open http://localhost:5000 to see all experiments
+    with their parameters, metrics, and model files.
 
     This is how data scientists track experiments in production —
-    not spreadsheets or print statements, but a versioned log
-    you can compare across retraining runs.
+    instead of writing results in a notebook or spreadsheet.
+
+    X_sample: small array of input features used to infer model
+    signature automatically — removes the MLflow signature warning.
     """
     mlflow.set_tracking_uri(os.path.abspath("mlruns"))
     mlflow.set_experiment("fraud_detection")
-    print("\nLogging to MLflow...")
+    print("\nLogging experiments to MLflow...")
 
-    with mlflow.start_run(run_name="XGBoost"):
-        mlflow.log_metric("auc_roc",   metrics['auc'])
-        mlflow.log_metric("precision", metrics['precision'])
-        mlflow.log_metric("recall",    metrics['recall'])
-        mlflow.set_tag("model_type", "XGBoost")
-        mlflow.sklearn.log_model(model, "model")
+    # Convert sample to DataFrame for clean signature inference
+    X_sample_df = pd.DataFrame(X_sample[:5])
+
+    for name, data in results.items():
+        with mlflow.start_run(run_name=name):
+            mlflow.log_metric("auc_roc",   data['auc'])
+            mlflow.log_metric("precision", data['precision'])
+            mlflow.log_metric("recall",    data['recall'])
+            mlflow.set_tag("model_type", name)
+            mlflow.set_tag("best_model", str(name == best_model_name))
+
+            # Use name= (not positional) and provide input_example to fix warnings
+            mlflow.sklearn.log_model(
+                sk_model=data['model'],
+                name="model",
+                input_example=X_sample_df
+            )
 
     print("MLflow logging complete. Run 'mlflow ui' to view dashboard.\n")
 
@@ -438,7 +523,7 @@ def check_data_drift(X_train, X_new, feature_names, threshold=0.3):
 
 def main():
     print("\n" + "=" * 60)
-    print("FRAUD DETECTION — XGBOOST PIPELINE")
+    print("FRAUD DETECTION — FULL TRAINING PIPELINE")
     print("=" * 60 + "\n")
 
     # Step 1: Load data
@@ -447,28 +532,60 @@ def main():
     # Step 2: Feature engineering
     df = engineer_features(df)
 
-    # Step 3: Preprocess — split, scale, apply SMOTE
+    # Step 3: Preprocess (SMOTE + scaling)
     X_train, y_train, X_test, y_test, scaler, feature_cols = preprocess(df)
 
-    # Step 4: Train XGBoost with GridSearchCV
-    model = train_model(X_train, y_train)
+    # Step 4: Train models
+    models = train_models(X_train, y_train)
 
-    # Step 5: Evaluate
-    metrics = evaluate_model(model, X_test, y_test)
+    # Step 5: Evaluate all models
+    results = evaluate_models(models, X_test, y_test)
 
-    # Step 6: Confusion matrix plot
-    plot_confusion_matrix(model, X_test, y_test)
+    # Step 6: Pick best model (highest AUC-ROC)
+    best_name = max(results, key=lambda k: results[k]['auc'])
+    best_model = results[best_name]['model']
+    print(f"\nBest model: {best_name} (AUC-ROC: {results[best_name]['auc']:.4f})")
 
-    # Step 7: SHAP explainability
+    # Step 7: Confusion matrix plot
+    plot_confusion_matrix(best_model, X_test, y_test, best_name)
+
+    # Step 8: ROC curve — all three models on one chart
+    plot_roc_curve(results, X_test, y_test)
+
+    # Step 9: SHAP explanations — always run on XGBoost (tree model required)
+    xgb_model = results['XGBoost']['model']
     try:
-        explain_with_shap(model, X_test, feature_cols)
+        explain_with_shap(xgb_model, X_test, feature_cols)
     except Exception as e:
         print(f"SHAP plot skipped: {e}")
 
-    # Step 8: Log to MLflow
-    log_to_mlflow(model, metrics)
+    # Step 10: Save best model + scaler for Flask API
+    import json
+    os.makedirs('models', exist_ok=True)
+    joblib.dump(best_model, 'models/fraud_model.pkl')
+    joblib.dump(scaler,     'models/scaler.pkl')
+    # Save feature column names so API applies same engineering
+    with open('models/feature_cols.txt', 'w') as f:
+        f.write('\n'.join(feature_cols))
+    # Save Amount statistics from training set so the Flask API can
+    # compute amount_zscore and high_value correctly for single transactions
+    # (cannot compute std/quantile from a single row — must use training stats)
+    amount_stats = {
+        'mean': float(df['Amount'].mean()),
+        'std':  float(df['Amount'].std()),
+        'q75':  float(df['Amount'].quantile(0.75))
+    }
+    with open('models/amount_stats.json', 'w') as f:
+        json.dump(amount_stats, f, indent=2)
+    print("Saved: models/fraud_model.pkl")
+    print("Saved: models/scaler.pkl")
+    print("Saved: models/feature_cols.txt")
+    print("Saved: models/amount_stats.json  (Amount mean/std/q75 for API inference)")
 
-    # Step 9: Drift check — simulate new incoming batch (last 10% of test data)
+    # Step 11: Log to MLflow (pass sample for clean signature inference)
+    log_to_mlflow(results, best_name, X_train[:10])
+
+    # Step 12: Drift check on a simulated "new batch" (last 10% of test data)
     split = int(len(X_test) * 0.9)
     check_data_drift(X_train, X_test[split:], feature_cols)
 
@@ -477,10 +594,13 @@ def main():
     print("=" * 60)
     print("Generated files:")
     print("  confusion_matrix.png  — model evaluation plot")
+    print("  roc_curve.png         — AUC-ROC curve all models")
     print("  shap_summary.png      — feature importance explanation")
     print("  shap_waterfall.png    — single prediction explanation")
     print("  mlruns/               — MLflow experiment logs")
+    print("  models/               — saved model + scaler for API")
     print("\nTo view MLflow dashboard: run 'mlflow ui' in this folder")
+    print("To start Flask API:       run 'python app.py'")
 
 
 if __name__ == "__main__":

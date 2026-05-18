@@ -1,0 +1,11 @@
+artifact_location: /Users/abdulfazil/old downloads/Career & Resume/claude project/bmo
+  ml projects/01_fraud_detection/mlruns/292354394569959540/models/m-99a56d3652374562813704cfbbaf99ea/artifacts
+creation_timestamp: 1779146423661
+experiment_id: '292354394569959540'
+last_updated_timestamp: 1779146425453
+model_id: m-99a56d3652374562813704cfbbaf99ea
+model_type: null
+name: model
+source_run_id: eb543a074dae4b6580999f564d6ffff9
+status: 2
+status_message: null

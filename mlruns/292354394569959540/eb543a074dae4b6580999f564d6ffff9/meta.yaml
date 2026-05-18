@@ -1,0 +1,15 @@
+artifact_uri: /Users/abdulfazil/old downloads/Career & Resume/claude project/bmo ml
+  projects/01_fraud_detection/mlruns/292354394569959540/eb543a074dae4b6580999f564d6ffff9/artifacts
+end_time: 1779146425455
+entry_point_name: ''
+experiment_id: '292354394569959540'
+lifecycle_stage: active
+run_id: eb543a074dae4b6580999f564d6ffff9
+run_name: Logistic Regression
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1779146423648
+status: 3
+tags: []
+user_id: abdulfazil
